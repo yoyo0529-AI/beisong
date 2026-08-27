@@ -140,6 +140,21 @@ w-mask{color:var(--err);font-weight:600;letter-spacing:.04em}
 .res .cnt{font-size:14px;margin-top:9px}
 .reveal{margin-top:11px}
 
+/* 今日任务卡 */
+.task{width:100%;text-align:left;padding:13px 15px;margin-bottom:8px;display:flex;align-items:center;gap:12px}
+.task .tick{flex:0 0 auto;font-size:12px;font-weight:700;padding:4px 10px;border-radius:20px;
+  background:var(--warnbg);color:var(--warn);white-space:nowrap}
+.task .tick.new{background:var(--accbg);color:var(--acc)}
+.task.ok{opacity:.55}
+.task.ok .tick{background:var(--okbg);color:var(--ok)}
+.task .t{flex:1;min-width:0}
+.task .t b{display:block;font-size:15.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cnt2{float:right;font-weight:600;letter-spacing:0}
+.cnt2.ok{color:var(--ok)}
+.row2{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:16px}
+.row2 input{width:96px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);
+  background:var(--card);color:var(--ink);font-size:16px;min-height:46px}
+
 </style>
 </head>
 <body>
@@ -225,14 +240,28 @@ function renderDiff(target, diff, mask){
 
 /* ============ 存档 ============ */
 const KEY = 'nce-recite-v1';
-const REVIEW_GAPS = [1,2,4,7,15];
+const REVIEW_GAPS  = [1,2,4,7,15];   // 艾宾浩斯复习间隔（天）
+const REVIEW_SAMPLE = 8;             // 复习时抽查几句
+const DUE_SHOW      = 5;             // 首页一次最多列几课复习
 let DB = load();
+
 function load(){
-  try { const r = JSON.parse(localStorage.getItem(KEY)); if (r && r.p) return r; } catch(e){}
-  return { p:{}, days:[] };
+  let r = null;
+  try { r = JSON.parse(localStorage.getItem(KEY)); } catch(e){}
+  if (!r || !r.p) r = { p:{}, days:[] };
+  r.plan = Object.assign({ perDay:8, unlockTo:999, lastNewDate:null }, r.plan || {});
+  // 老存档没有 pos 字段，补上：已通关的课当作全部背完
+  for (const id in r.p){
+    const rec = r.p[id];
+    if (rec.pos === undefined){
+      const l = DATA.find(x => x.id === id);
+      rec.pos = rec.done && l ? l.sentenceCount : 0;
+    }
+  }
+  return r;
 }
 function save(){ try { localStorage.setItem(KEY, JSON.stringify(DB)); } catch(e){} }
-function rec(id){ return DB.p[id] || (DB.p[id] = { stage:0, done:false, cleared:null, rIdx:0, next:null }); }
+function rec(id){ return DB.p[id] || (DB.p[id] = { pos:0, stage:0, done:false, cleared:null, rIdx:0, next:null }); }
 function markDay(){ const d = today(); if (!DB.days.includes(d)){ DB.days.push(d); DB.days.sort(); } save(); }
 function streak(){
   if (!DB.days.length) return 0;
@@ -241,32 +270,63 @@ function streak(){
   while (DB.days.includes(d)){ n++; d = addDays(d,-1); }
   return n;
 }
-const DUE_SHOW = 5;                       // 首页一次最多显示几课，避免堆积吓人
+
+/* ============ 背诵计划 ============ */
+// 一课按每天句数切成若干段；剩下不多时（≤1.5 倍）一次做完，不留两三句的尾巴
+function segOf(l){
+  const r = DB.p[l.id] || { pos:0 };
+  const pos = Math.min(r.pos || 0, l.sentenceCount);
+  const remain = l.sentenceCount - pos;
+  if (remain <= 0) return null;
+  const n = DB.plan.perDay;
+  const len = remain <= Math.ceil(n * 1.5) ? remain : n;
+  return { from: pos, len, to: pos + len, remain, total: l.sentenceCount };
+}
+// 下一课新背：第一门没背完、且在"已解锁"范围内的课
+function nextNew(){
+  for (const l of DATA){
+    if (l.num > DB.plan.unlockTo && l.book === 'NCE2') continue;
+    if (l.book === 'NCE3' && DB.plan.unlockTo < 900 && !allDone('NCE2')) continue;
+    const r = DB.p[l.id];
+    if (r && r.done) continue;
+    const s = segOf(l);
+    if (s) return { lesson: l, seg: s };
+  }
+  return null;
+}
+function allDone(book){ return DATA.filter(l => l.book === book).every(l => (DB.p[l.id]||{}).done); }
+function newDoneToday(){ return DB.plan.lastNewDate === today(); }
+
 function dueList(){
   const t = today();
   return DATA
     .filter(l => { const r = DB.p[l.id]; return r && r.done && r.next && r.next <= t; })
-    .sort((a, b) => {                     // 拖得最久的排最前面
-      const x = DB.p[a.id].next, y = DB.p[b.id].next;
-      return x === y ? a.num - b.num : (x < y ? -1 : 1);
-    });
+    .sort((a,b) => { const x = DB.p[a.id].next, y = DB.p[b.id].next;
+                     return x === y ? a.num - b.num : (x < y ? -1 : 1); });
 }
 function overdueDays(id){
   const n = DB.p[id] && DB.p[id].next; if (!n) return 0;
   return Math.max(0, Math.round((new Date(today()) - new Date(n)) / 86400000));
 }
+function reviewedToday(id){ const r = DB.p[id]; return r && r.lastRev === today(); }
+function todayTasks(){
+  const due = dueList().slice(0, DUE_SHOW).map(l => ({ kind:'review', lesson:l, done:reviewedToday(l.id) }));
+  const nn = nextNew();
+  if (nn) due.push({ kind:'new', lesson:nn.lesson, seg:nn.seg, done:newDoneToday() });
+  return due;
+}
+
 function clearLesson(id){
-  const r = rec(id); r.done = true; r.stage = 4; r.cleared = r.cleared || today();
+  const r = rec(id); r.done = true; r.stage = 0;
+  const l = DATA.find(x => x.id === id); r.pos = l.sentenceCount;
+  r.cleared = r.cleared || today();
   r.rIdx = 0; r.next = addDays(today(), REVIEW_GAPS[0]); markDay(); save();
 }
 function finishReview(id, clean){
-  const r = rec(id);
-  if (clean){                              // 抽查全对 → 推进到下一档
-    r.rIdx = Math.min((r.rIdx||0) + 1, REVIEW_GAPS.length - 1);
-    r.next = addDays(today(), REVIEW_GAPS[r.rIdx]);
-  } else {                                 // 有看答案或跳过 → 档位不变，明天再来
-    r.next = addDays(today(), 1);
-  }
+  const r = rec(id); r.lastRev = today();
+  if (clean){ r.rIdx = Math.min((r.rIdx||0) + 1, REVIEW_GAPS.length - 1);
+              r.next = addDays(today(), REVIEW_GAPS[r.rIdx]); }
+  else      { r.next = addDays(today(), 1); }
   markDay(); save();
 }
 
@@ -288,75 +348,104 @@ function playSentence(i, after){
 }
 
 /* ============ 状态 ============ */
-let VIEW = 'home', BOOK = 'NCE2', L = null, BODY = [], STAGE = 1, IDX = 0, REVIEW = false;
-let picked = [], pool = [], wrongTaps = 0, tries = 0;
-const REVIEW_SAMPLE = 8;      // 复习时抽查几句
-let reviewClean = true;
+let VIEW = 'home', BOOK = 'NCE2', L = null, BODY = [], STAGE = 1, IDX = 0;
+let MODE = 'new';                 // new | review
+let SEG = null;                   // 本次练习的句段
+let picked = [], pool = [], wrongTaps = 0, tries = 0, reviewClean = true;
+function shuffle(a){ const x=a.slice(); for(let i=x.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[x[i],x[j]]=[x[j],x[i]];} return x; }
 
 /* ============ 首页 ============ */
 function renderHome(){
   VIEW = 'home'; au.pause();
   const cleared = Object.values(DB.p).filter(r => r.done).length;
-  const due = dueList();
+  const tasks = todayTasks();
+  const left = tasks.filter(t => !t.done).length;
+  const dueAll = dueList();
   $('#head').innerHTML = `<div class="hbar"><h1>新概念背诵</h1>
-    <button class="iconbtn" id="reset" title="备份与设置">⋯</button></div>`;
-  $('#stagebar').innerHTML = '';
-  $('#bar').classList.add('hide');
+    <button class="iconbtn" id="setting" title="设置与备份">⋯</button></div>`;
+  $('#stagebar').innerHTML = ''; $('#bar').classList.add('hide');
+
+  const taskHtml = tasks.length ? tasks.map(t => {
+    const l = t.lesson;
+    if (t.kind === 'review'){
+      const od = overdueDays(l.id);
+      return `<button class="card task ${t.done?'ok':''}" data-go="${l.id}" data-mode="review">
+        <span class="tick">${t.done ? '✓' : '复习'}</span>
+        <div class="t"><b>${esc(l.title)}</b>
+          <span class="tiny muted">${l.bookCn} 第${l.num}课 · 抽查 ${Math.min(l.sentenceCount, REVIEW_SAMPLE)} 句</span></div>
+        ${od > 0 && !t.done ? `<span class="pill">拖了${od}天</span>` : ''}</button>`;
+    }
+    const s = t.seg;
+    return `<button class="card task ${t.done?'ok':''}" data-go="${l.id}" data-mode="new">
+      <span class="tick new">${t.done ? '✓' : '新背'}</span>
+      <div class="t"><b>${esc(l.title)}</b>
+        <span class="tiny muted">${l.bookCn} 第${l.num}课 · 第 ${s.from+1}-${s.to} 句（共${s.total}句）</span></div></button>`;
+  }).join('') : `<div class="card q"><div class="tiny muted">全部课文都背完了 👏 想复习就从下面挑一课。</div></div>`;
+
   $('#app').innerHTML = `
     <div class="card hero">
       <div class="stat"><b>${streak()}</b><span>连续天数</span></div>
       <div class="stat"><b>${cleared}</b><span>已通关</span></div>
-      <div class="stat"><b>${due.length}</b><span>今日待复习</span></div>
+      <div class="stat"><b>${DB.plan.perDay}</b><span>每天句数</span></div>
     </div>
-    ${due.length ? `<div class="sec">今天该复习${due.length > DUE_SHOW ? `（共 ${due.length} 课，先做这 ${DUE_SHOW} 课）` : ''}</div>`
-      + due.slice(0, DUE_SHOW).map(l => { const od = overdueDays(l.id);
-      return `<button class="card rev" data-go="${l.id}" data-review="1">
-        <div class="t"><b>${esc(l.title)}</b><span class="tiny muted">${l.bookCn} 第${l.num}课 · 抽查 ${Math.min(l.sentenceCount, REVIEW_SAMPLE)} 句</span></div>
-        <span class="pill">${od > 0 ? `拖了${od}天` : '复习'}</span></button>`; }).join('')
-      + (due.length > DUE_SHOW ? `<div class="tiny muted" style="margin:2px 4px 0">做完这 ${DUE_SHOW} 课，剩下的 ${due.length - DUE_SHOW} 课会自动补上来。</div>` : '') : ''}
-    <div class="sec">选择课文</div>
+    <div class="sec">今天的任务
+      ${tasks.length ? (left ? `<span class="cnt2">还剩 ${left} 项</span>` : `<span class="cnt2 ok">全部完成 🎉</span>`) : ''}</div>
+    <div class="prog" style="margin-bottom:10px"><i style="width:${tasks.length ? (tasks.length-left)/tasks.length*100 : 100}%"></i></div>
+    ${taskHtml}
+    ${dueAll.length > DUE_SHOW ? `<div class="tiny muted" style="margin:2px 4px 0">还有 ${dueAll.length - DUE_SHOW} 课待复习，做完上面这些会自动补上来。</div>` : ''}
+    ${newDoneToday() && nextNew() ? `<div style="margin-top:10px"><button class="btn ghost" id="more">今天还想多背一段（选做）</button></div>` : ''}
+    <div class="sec">全部课文</div>
     <div class="tabs">
       <button class="tab ${BOOK==='NCE2'?'on':''}" data-book="NCE2">第二册 · 96课</button>
       <button class="tab ${BOOK==='NCE3'?'on':''}" data-book="NCE3">第三册 · 60课</button>
     </div>
     <div class="grid">${DATA.filter(l => l.book === BOOK).map(l => {
-      const r = DB.p[l.id] || {};
-      const isDue = r.done && r.next && r.next <= today();
-      const st = r.done ? (isDue ? '待复习' : '已通关') : (r.stage ? `第${r.stage}关` : `${l.sentenceCount}句`);
-      return `<button class="les ${r.done?'done':''} ${isDue?'due':''}" data-go="${l.id}">
+      const r = DB.p[l.id] || {}; const isDue = r.done && r.next && r.next <= today();
+      const st = r.done ? (isDue ? '待复习' : '已通关')
+               : (r.pos ? `背到 ${r.pos}/${l.sentenceCount} 句` : `${l.sentenceCount}句`);
+      return `<button class="les ${r.done?'done':''} ${isDue?'due':''}" data-go="${l.id}" data-mode="new">
         <div class="num">${l.num}</div>
         <div style="flex:1;min-width:0"><div class="ti">${esc(l.title)}</div><div class="st">${st}</div></div>
       </button>`; }).join('')}</div>
     <div style="height:24px"></div>`;
+
   $$('[data-book]').forEach(b => b.onclick = () => { BOOK = b.dataset.book; renderHome(); });
-  $$('[data-go]').forEach(b => b.onclick = () => openLesson(b.dataset.go, b.dataset.review === '1'));
-  $('#reset').onclick = renderBackup;
+  $$('[data-go]').forEach(b => b.onclick = () => openLesson(b.dataset.go, b.dataset.mode));
+  $('#setting').onclick = renderSetting;
+  const m = $('#more'); if (m) m.onclick = () => { const nn = nextNew(); if (nn) openLesson(nn.lesson.id, 'new'); };
 }
 
-/* ============ 进入课文 ============ */
-function openLesson(id, review){
+/* ============ 进入一课 ============ */
+function openLesson(id, mode){
   L = DATA.find(l => l.id === id);
   const all = L.lines.filter(x => x.kind === 'text');
-  REVIEW = !!review;
+  MODE = mode === 'review' ? 'review' : 'new';
   reviewClean = true;
-  // 复习不默写整课（三册一课最多 38 句，太劝退），随机抽 8 句，按原顺序排好
-  BODY = REVIEW && all.length > REVIEW_SAMPLE
-    ? shuffle(all.map((x, i) => i)).slice(0, REVIEW_SAMPLE).sort((a, b) => a - b).map(i => all[i])
-    : all;
+  if (MODE === 'review'){
+    // 复习不默写整课（三册一课最多 38 句），随机抽 8 句，按原顺序排好
+    BODY = all.length > REVIEW_SAMPLE
+      ? shuffle(all.map((x,i) => i)).slice(0, REVIEW_SAMPLE).sort((a,b)=>a-b).map(i => all[i])
+      : all;
+    SEG = null; STAGE = 4;
+  } else {
+    const r = rec(id);
+    if (r.done && r.pos >= all.length){ r.pos = 0; r.stage = 0; }   // 已通关的课再点 = 从头重练
+    SEG = segOf(L) || { from:0, len:all.length, to:all.length, total:all.length };
+    BODY = all.slice(SEG.from, SEG.to);
+    STAGE = Math.min((r.stage || 0) + 1, 4);
+  }
   au.src = L.audioUrl; au.playbackRate = parseFloat($('#rate')?.value || 1);
-  const r = rec(id);
-  STAGE = review ? 4 : Math.min((r.stage || 0) + 1, 4);
-  if (r.done && !review) STAGE = 1;
   IDX = 0; renderStage();
 }
 function renderStage(){
   $('#bar').classList.remove('hide');
+  const sub = MODE === 'review' ? '复习' : (SEG && SEG.total > BODY.length ? `第 ${SEG.from+1}-${SEG.to} 句` : '');
   $('#head').innerHTML = `<div class="hbar">
       <button class="iconbtn" id="back">‹</button>
       <h1>${esc(L.title)}</h1>
-      <span class="tiny muted">${L.bookCn}·${L.num}</span></div>`;
+      <span class="tiny muted">${sub || (L.bookCn + '·' + L.num)}</span></div>`;
   $('#back').onclick = () => { au.pause(); renderHome(); };
-  if (REVIEW){
+  if (MODE === 'review'){
     $('#stagebar').innerHTML = `<div class="stages"><div class="sg on">复习 · 抽查 ${BODY.length} 句默写</div></div>`;
   } else {
     const names = ['听读','跟读','拼句','默写'];
@@ -369,24 +458,44 @@ function renderStage(){
 }
 function nextStage(){
   const r = rec(L.id);
+  if (MODE === 'review'){ finishReview(L.id, reviewClean); return doneScreen(); }
   r.stage = Math.max(r.stage || 0, STAGE); markDay(); save();
   if (STAGE < 4){ STAGE++; renderStage(); return; }
-  if (REVIEW) finishReview(L.id, reviewClean); else clearLesson(L.id);
-  au.pause();
-  $('#stagebar').innerHTML = ''; $('#bar').classList.add('hide');
-  const r2 = rec(L.id);
+  // 这一段四关走完
+  r.pos = Math.min((r.pos || 0) + BODY.length, L.sentenceCount);
+  r.stage = 0;
+  DB.plan.lastNewDate = today();
+  if (r.pos >= L.sentenceCount) clearLesson(L.id); else { markDay(); save(); }
+  doneScreen();
+}
+function doneScreen(){
+  au.pause(); $('#stagebar').innerHTML = ''; $('#bar').classList.add('hide');
+  const r = rec(L.id);
+  const finished = MODE === 'review' || r.done;
+  const rest = L.sentenceCount - r.pos;
+  let title, note;
+  if (MODE === 'review'){
+    title = reviewClean ? '复习通过！' : '复习完成，明天再来一次';
+    note = `下次复习：${r.next}`;
+  } else if (r.done){
+    title = '这一课通关了！';
+    note = `全部 ${L.sentenceCount} 句 · 下次复习：${r.next}`;
+  } else {
+    title = '这一段背完了！';
+    note = `这一课还剩 ${rest} 句，明天接着背`;
+  }
   $('#app').innerHTML = `<div class="card done">
-      <div class="big">${REVIEW && !reviewClean ? '💪' : '🎉'}</div>
-      <h2>${REVIEW ? (reviewClean ? '复习通过！' : '复习完成，明天再来一次') : '这一课通关了！'}</h2>
-      <p class="muted">${esc(L.title)} · ${BODY.length} 句</p>
-      <p class="tiny muted">下次复习：${r2.next}</p>
+      <div class="big">${MODE==='review' && !reviewClean ? '💪' : '🎉'}</div>
+      <h2>${title}</h2>
+      <p class="muted">${esc(L.title)}</p>
+      <p class="tiny muted">${note}</p>
       <div style="margin-top:18px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
         <button class="btn pri" id="home">回到首页</button>
-        <button class="btn" id="again">再练一遍默写</button></div></div>`;
+        ${!finished ? `<button class="btn" id="cont">继续背下一段</button>` : ''}
+      </div></div>`;
   $('#home').onclick = renderHome;
-  $('#again').onclick = () => { STAGE = 4; renderStage(); };
+  const c = $('#cont'); if (c) c.onclick = () => openLesson(L.id, 'new');
 }
-
 /* ============ 第1关 听读 ============ */
 function hilite(){
   const els = $$('#app .s'); let k = -1;
@@ -435,7 +544,6 @@ function drawFollow(){
 
 /* ============ 第3关 拼句 ============ */
 function stage3(){ drawBuild(); }
-function shuffle(a){ const x = a.slice(); for (let i = x.length-1; i > 0; i--){ const j = Math.floor(Math.random()*(i+1)); [x[i],x[j]] = [x[j],x[i]]; } return x; }
 function drawBuild(){
   const b = BODY[IDX];
   const words = b.en.split(/\s+/).filter(Boolean);
@@ -547,13 +655,26 @@ function bar(items, withRate){
   const r = $('#rate'); if (r){ r.value = String(au.playbackRate); r.onchange = () => au.playbackRate = parseFloat(r.value); }
 }
 
-/* ============ 备份 / 恢复 ============ */
-function renderBackup(){
-  VIEW = 'backup'; au.pause();
-  $('#head').innerHTML = `<div class="hbar"><button class="iconbtn" id="back">‹</button><h1>备份与恢复</h1></div>`;
+
+/* ============ 设置 · 备份 ============ */
+function renderSetting(){
+  VIEW = 'setting'; au.pause();
+  $('#head').innerHTML = `<div class="hbar"><button class="iconbtn" id="back">‹</button><h1>设置与备份</h1></div>`;
   $('#stagebar').innerHTML = ''; $('#bar').classList.add('hide');
   const cleared = Object.values(DB.p).filter(r => r.done).length;
+  const unlocked = DB.plan.unlockTo >= 900 ? '' : DB.plan.unlockTo;
   $('#app').innerHTML = `
+    <div class="card q">
+      <div class="lab">背诵计划</div>
+      <div class="row2"><span>每天新背</span>
+        <select id="perDay">${[4,5,6,8,10,12,15].map(n =>
+          `<option value="${n}" ${n===DB.plan.perDay?'selected':''}>${n} 句</option>`).join('')}</select></div>
+      <div class="tiny muted" style="margin-top:6px">一课会按这个数切成几段，每天背一段。剩下不多时会一次做完，不留两三句的尾巴。</div>
+      <div class="row2" style="margin-top:16px"><span>只背到第二册第</span>
+        <input id="unlock" type="number" min="1" max="96" inputmode="numeric" value="${unlocked}" placeholder="不限">
+        <span>课</span></div>
+      <div class="tiny muted" style="margin-top:6px">你的课学到哪，就填哪。工具不会给你排还没学过的课。留空 = 不限制，一路背下去。</div>
+    </div>
     <div class="card q">
       <div class="lab">为什么要备份</div>
       <div class="tiny" style="line-height:1.7">进度只存在这台设备的浏览器里。iPad 的 Safari 长期不打开某个网站会清掉它的数据，换设备也带不过去。
@@ -581,8 +702,15 @@ function renderBackup(){
     </div>
     <div style="height:20px"></div>`;
   $('#back').onclick = renderHome;
-  const text = () => JSON.stringify({ app:'nce-recite', v:1, at: today(), db: DB });
-  $('#box').value = text();
+  const text = () => JSON.stringify({ app:'nce-recite', v:2, at: today(), db: DB });
+  const refresh = () => { $('#box').value = text(); };
+  $('#perDay').onchange = e => { DB.plan.perDay = parseInt(e.target.value, 10); save(); refresh(); toast('每天 ' + DB.plan.perDay + ' 句'); };
+  $('#unlock').onchange = e => {
+    const v = parseInt(e.target.value, 10);
+    DB.plan.unlockTo = (v >= 1 && v <= 96) ? v : 999; save(); refresh();
+    toast(DB.plan.unlockTo >= 900 ? '不限制课程范围' : '只排到第二册第 ' + DB.plan.unlockTo + ' 课');
+  };
+  refresh();
   $('#dl').onclick = () => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([text()], {type:'application/json'}));
@@ -600,12 +728,14 @@ function renderBackup(){
     const d = o && o.db && o.db.p ? o.db : (o && o.p ? o : null);
     if (!d){ toast('这不是一份有效的备份'); return; }
     if (!confirm('用粘贴的内容覆盖这台设备的进度？')) return;
-    DB = { p: d.p || {}, days: d.days || [] }; save();
+    localStorage.setItem(KEY, JSON.stringify({ p: d.p || {}, days: d.days || [], plan: d.plan || {} }));
+    DB = load(); save();
     toast('恢复成功'); setTimeout(renderHome, 700);
   };
   $('#wipe').onclick = () => {
     if (!confirm('清空这台设备上的全部进度？无法撤销。')) return;
-    DB = { p:{}, days:[] }; save(); toast('已清空'); setTimeout(renderHome, 700);
+    localStorage.removeItem(KEY); DB = load(); save();
+    toast('已清空'); setTimeout(renderHome, 700);
   };
 }
 
