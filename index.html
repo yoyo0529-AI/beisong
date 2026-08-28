@@ -155,6 +155,14 @@ w-mask{color:var(--err);font-weight:600;letter-spacing:.04em}
 .row2 input{width:96px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);
   background:var(--card);color:var(--ink);font-size:16px;min-height:46px}
 
+/* 备份提醒条 */
+.warnbar{width:100%;text-align:left;display:flex;gap:11px;align-items:flex-start;
+  padding:13px 15px;margin-bottom:12px;background:var(--warnbg);border-color:var(--warn);font-size:14.5px;line-height:1.6}
+.warnbar .wi{flex:0 0 auto;width:22px;height:22px;border-radius:50%;background:var(--warn);color:#fff;
+  font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:1px}
+.warnbar.soft{background:var(--accbg);border-color:var(--acc)}
+.warnbar.soft .wi{background:var(--acc)}
+
 </style>
 </head>
 <body>
@@ -273,6 +281,7 @@ function load(){
   r.days = r.days.filter(d => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
   const pl = (r.plan && typeof r.plan === 'object') ? r.plan : {};
   r.plan = {
+    lastBackup: typeof pl.lastBackup === 'string' ? pl.lastBackup : null,
     perDay: (Number.isFinite(+pl.perDay) && +pl.perDay >= 1 && +pl.perDay <= 50) ? Math.round(+pl.perDay) : 8,
     unlockTo: (Number.isFinite(+pl.unlockTo) && +pl.unlockTo >= 1) ? Math.round(+pl.unlockTo) : 999,
     lastNewDate: typeof pl.lastNewDate === 'string' ? pl.lastNewDate : null,
@@ -455,7 +464,20 @@ function renderHome(){
            后面的课还锁着——课学到哪了，就去右上角 <b>⋯</b> 把「只背到第二册第几课」往后调。</div></div>`
       : `<div class="card q"><div class="tiny muted">全部课文都背完了 👏 想复习就从下面挑一课。</div></div>`);
 
+  const bk = DB.plan.lastBackup;
+  const bkDays = bk ? Math.round((new Date(today()) - new Date(bk)) / 86400000) : null;
+  const hasProgress = Object.keys(DB.p).length > 0;
+  const needBackup = hasProgress && (bk === null || bkDays >= 7);
   $('#app').innerHTML = `
+    ${needBackup ? `<button class="card warnbar" id="gobk">
+        <span class="wi">!</span>
+        <span>${bk === null ? '你还从没备份过进度。手机浏览器有可能把记录清掉——<b>点这里备份一次</b>，一分钟。'
+                            : `上次备份是 <b>${bkDays} 天前</b>了，<b>点这里再备份一次</b>。`}</span>
+      </button>` : ''}
+    ${!hasProgress ? `<button class="card warnbar soft" id="gobk2">
+        <span class="wi">?</span>
+        <span>这里是空的。<b>如果你在别的手机或浏览器上练过</b>，点这里，把之前备份的内容粘回来。</span>
+      </button>` : ''}
     <div class="card hero">
       <div class="stat"><b>${streak()}</b><span>连续天数</span></div>
       <div class="stat"><b>${cleared}</b><span>已通关</span></div>
@@ -486,6 +508,9 @@ function renderHome(){
   $$('[data-book]').forEach(b => b.onclick = () => { BOOK = b.dataset.book; renderHome(); });
   $$('[data-go]').forEach(b => b.onclick = () => openLesson(b.dataset.go, b.dataset.mode));
   $('#setting').onclick = renderSetting;
+  const g1 = $('#gobk'), g2 = $('#gobk2');
+  if (g1) g1.onclick = renderSetting;
+  if (g2) g2.onclick = renderSetting;
   const m = $('#more'); if (m) m.onclick = () => { const nn = nextNew(); if (nn) openLesson(nn.lesson.id, 'new'); };
 }
 
@@ -786,6 +811,10 @@ function renderSetting(){
       <div style="margin-top:12px"><button class="btn ok" id="restore">用粘贴的内容恢复</button></div>
     </div>
     <div class="card q">
+      <div class="lab">诊断（记录莫名丢了的时候，把这里截图发我）</div>
+      <div id="diag" class="tiny" style="line-height:1.85;font-variant-numeric:tabular-nums"></div>
+    </div>
+    <div class="card q">
       <div class="lab">清空</div>
       <div class="tiny muted">删掉这台设备上的全部进度，无法撤销。建议先备份。</div>
       <div style="margin-top:12px"><button class="btn" id="wipe" style="color:var(--err);border-color:var(--err)">清空全部进度</button></div>
@@ -801,7 +830,9 @@ function renderSetting(){
     toast(DB.plan.unlockTo >= 900 ? '不限制课程范围' : '只排到第二册第 ' + DB.plan.unlockTo + ' 课');
   };
   refresh();
+  const stamp = () => { DB.plan.lastBackup = today(); save(); };
   $('#dl').onclick = () => {
+    stamp();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([text()], {type:'application/json'}));
     a.download = `新概念背诵进度-${today()}.json`;
@@ -809,6 +840,7 @@ function renderSetting(){
     toast('已下载。手机上如果没反应，用「复制到剪贴板」');
   };
   $('#copy').onclick = async () => {
+    stamp();
     const el = $('#box'); el.select(); el.setSelectionRange(0, 999999);
     try { await navigator.clipboard.writeText(text()); toast('已复制'); }
     catch(e){ document.execCommand('copy'); toast('已复制'); }
@@ -822,6 +854,34 @@ function renderSetting(){
     DB = load(); save();
     toast('恢复成功'); setTimeout(renderHome, 700);
   };
+  // ---- 诊断：把浏览器里到底存了什么、能不能写，如实摆出来 ----
+  (function diag(){
+    const rows = [];
+    const add = (k, v, warn) => rows.push(
+      `<div><span class="muted">${k}：</span>${warn ? `<b style="color:var(--err)">${v}</b>` : `<b>${v}</b>`}</div>`);
+    add('打开方式', location.protocol === 'file:' ? '本地文件（进度不与线上互通）' : location.host,
+        location.protocol === 'file:');
+    add('页面地址', location.pathname);
+    let writable = false, err = '';
+    try { localStorage.setItem('__t', '1'); localStorage.removeItem('__t'); writable = true; }
+    catch(e){ err = e && e.name ? e.name : '未知错误'; }
+    add('能否存进度', writable ? '可以' : `不行（${err}）—— 多半开了无痕模式`, !writable);
+    let keys = [];
+    try { for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i)); } catch(e){}
+    const mine = keys.filter(k => /nce/i.test(k));
+    add('本站存了几项', keys.length + ' 项，其中和本工具有关的 ' + mine.length + ' 项',
+        mine.length === 0);
+    mine.forEach(k => {
+      let size = 0; try { size = (localStorage.getItem(k) || '').length; } catch(e){}
+      add('　└ ' + k, size + ' 字节' + (k === KEY ? '（当前使用）' : '（旧数据）'));
+    });
+    add('课程记录', Object.keys(DB.p).length + ' 课', Object.keys(DB.p).length === 0);
+    add('打卡天数', DB.days.length + ' 天' + (DB.days.length ? `（最近 ${DB.days[DB.days.length-1]}）` : ''));
+    add('上次备份', DB.plan.lastBackup || '从未备份', !DB.plan.lastBackup);
+    add('浏览器', (navigator.userAgent || '').slice(0, 80));
+    $('#diag').innerHTML = rows.join('');
+  })();
+
   $('#wipe').onclick = () => {
     if (!confirm('清空这台设备上的全部进度？无法撤销。')) return;
     localStorage.removeItem(KEY); DB = load(); save();
