@@ -300,9 +300,60 @@ function load(){
   }
   return r;
 }
+/* ---- 备用副本：存进 IndexedDB ----
+   同一个 github.io 域名下的别的网页共用同一块 localStorage，它们调一次「清空全部」
+   就会把这里的进度一起抹掉。IndexedDB 是另一块地方，清 localStorage 不会动它。 */
+const IDB_DB = 'nce-recite-backup', IDB_ST = 'kv', IDB_K = 'db';
+let idbLast = '';
+function idbOpen(){
+  return new Promise((res, rej) => {
+    let r; try { r = indexedDB.open(IDB_DB, 1); } catch(e){ return rej(e); }
+    r.onupgradeneeded = () => { try { r.result.createObjectStore(IDB_ST); } catch(e){} };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function idbPut(text){
+  if (text === idbLast) return;
+  try {
+    const db = await idbOpen();
+    await new Promise((res, rej) => {
+      const t = db.transaction(IDB_ST, 'readwrite');
+      t.objectStore(IDB_ST).put(text, IDB_K);
+      t.oncomplete = res; t.onerror = () => rej(t.error);
+    });
+    idbLast = text;
+  } catch(e){}
+}
+async function idbGet(){
+  try {
+    const db = await idbOpen();
+    return await new Promise((res, rej) => {
+      const t = db.transaction(IDB_ST, 'readonly');
+      const q = t.objectStore(IDB_ST).get(IDB_K);
+      q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+    });
+  } catch(e){ return null; }
+}
+// 开机自救：localStorage 空了但备用副本还在 → 自动搬回来
+async function rescue(){
+  const text = JSON.stringify(DB);
+  if (Object.keys(DB.p).length){ idbPut(text); return; }
+  const raw = await idbGet();
+  if (!raw) return;
+  let o; try { o = JSON.parse(raw); } catch(e){ return; }
+  if (!o || !o.p || !Object.keys(o.p).length) return;
+  try { localStorage.setItem(KEY, raw); } catch(e){}
+  DB = load(); idbLast = raw;
+  if (VIEW === 'home') renderHome();
+  toast('进度曾被清空，已从备用副本自动恢复 ✓');
+}
+
 let saveWarned = false;
 function save(){
-  try { localStorage.setItem(KEY, JSON.stringify(DB)); saveWarned = false; }
+  const text = JSON.stringify(DB);
+  idbPut(text);                          // 另存一份到 IndexedDB，防止被同域名的别的网页清掉
+  try { localStorage.setItem(KEY, text); saveWarned = false; }
   catch(e){                       // 无痕模式 / 存储满：必须让人知道，否则一整天白背
     if (!saveWarned){ saveWarned = true; toast('⚠️ 进度存不进去！可能开了无痕模式，今天的记录关掉就没了'); }
   }
@@ -879,7 +930,15 @@ function renderSetting(){
     add('打卡天数', DB.days.length + ' 天' + (DB.days.length ? `（最近 ${DB.days[DB.days.length-1]}）` : ''));
     add('上次备份', DB.plan.lastBackup || '从未备份', !DB.plan.lastBackup);
     add('浏览器', (navigator.userAgent || '').slice(0, 80));
+    rows.push('<div><span class="muted">备用副本：</span><b id="dgidb">查询中…</b></div>');
     $('#diag').innerHTML = rows.join('');
+    idbGet().then(raw => {
+      const el = $('#dgidb'); if (!el) return;
+      if (!raw){ el.textContent = '暂无'; return; }
+      let cnt = 0; try { cnt = Object.keys(JSON.parse(raw).p || {}).length; } catch(e){}
+      el.textContent = `有，${cnt} 课（${raw.length} 字节）`;
+      el.style.color = 'var(--ok)';
+    }).catch(() => { const el = $('#dgidb'); if (el) el.textContent = '这个浏览器不支持'; });
   })();
 
   $('#wipe').onclick = () => {
@@ -890,6 +949,7 @@ function renderSetting(){
 }
 
 renderHome();
+rescue();      // 开机检查：localStorage 被别的网页清掉的话，从备用副本搬回来
 
 </script>
 </body>
